@@ -434,13 +434,13 @@ class CustomDataset(Dataset):
         target["image_id"] = image_id
 
         # Before transformation
-        labels = labels.cpu().numpy().tolist()  # Convert tensor to list
-        bboxes = target['boxes'].cpu().numpy().tolist()
+        labels = labels.cpu().numpy().tolist() if isinstance(labels, torch.Tensor) else labels
+        bboxes = target['boxes'].cpu().numpy().tolist() if isinstance(target['boxes'], torch.Tensor) else target['boxes'].tolist()
 
         if self.use_train_aug: # Use train augmentation if argument is passed.
             train_aug = get_train_aug()
             sample = train_aug(image=image_resized,
-                                     bboxes=target['boxes'],
+                                     bboxes=bboxes,
                                      labels=labels)
             image_resized = sample['image']
             target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.int64)
