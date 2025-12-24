@@ -319,7 +319,7 @@ def set_training_dir(dir_name=None, project_dir=None):
         os.makedirs(project_dir, exist_ok=True)
         return project_dir
     if not os.path.exists('outputs/training'):
-        os.makedirs('outputs/training')
+        os.makedirs('outputs/training', exist_ok=True)
     if dir_name:
         new_dir_name = f"outputs/training/{dir_name}"
         os.makedirs(new_dir_name, exist_ok=True)
