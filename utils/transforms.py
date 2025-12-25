@@ -53,7 +53,7 @@ def transform_mosaic(mosaic, boxes, img_size=640):
     :param img_resize: Desired resize.
     """
     aug = A.Compose(
-        [A.Resize(img_size, img_size, always_apply=True, p=1.0)
+        [A.Resize(img_size, img_size, p=1.0)
     ])
     sample = aug(image=mosaic)
     resized_mosaic = sample['image']
