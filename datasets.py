@@ -47,6 +47,9 @@ class CustomDataset(Dataset):
         self.log_annot_issue_y = True
         self.label_type = label_type
         
+        # ⭐ NEW: Case-insensitive class mapping (matches Cell 4 validation logic)
+        self.class_map = self._build_case_insensitive_class_map()
+        
         # get all the image paths in sorted order
         for file_type in self.image_file_types:
             self.all_image_paths.extend(glob.glob(os.path.join(self.images_path, file_type)))
@@ -56,6 +59,26 @@ class CustomDataset(Dataset):
         # Remove all annotations and images when no object is present.
         if self.label_type == 'pascal_voc':
             self.read_and_clean()
+
+    def _build_case_insensitive_class_map(self):
+        """
+        Build case-insensitive class mapping.
+        Maps normalized class names (lowercase) to their indices.
+        Compatible with Cell 4's SmartClassValidator logic.
+        """
+        class_map = {}
+        for idx, class_name in enumerate(self.classes):
+            normalized_name = str(class_name).lower().strip()
+            class_map[normalized_name] = idx
+        return class_map
+
+    def _get_class_index(self, class_name):
+        """
+        Get class index with case-insensitive matching.
+        Returns None if class not found (filters unknown classes).
+        """
+        normalized = str(class_name).lower().strip()
+        return self.class_map.get(normalized, None)
 
     def read_and_clean(self):
         print('Checking Labels and images...')
@@ -69,12 +92,21 @@ class CustomDataset(Dataset):
                 images_to_remove.append(image_name)
                 continue
 
-            # Check for invalid bounding boxes
+            # Check for invalid bounding boxes AND unknown classes
             tree = et.parse(possible_annot_name)
             root = tree.getroot()
             invalid_bbox = False
+            has_valid_object = False  # Track if ANY valid object exists
 
             for member in root.findall('object'):
+                # ⭐ Check class validity first (case-insensitive)
+                class_name = member.find('name').text
+                class_idx = self._get_class_index(class_name)
+                
+                # Skip unknown classes (they'll be filtered during training)
+                if class_idx is None:
+                    continue
+                
                 xmin = float(member.find('bndbox').find('xmin').text)
                 xmax = float(member.find('bndbox').find('xmax').text)
                 ymin = float(member.find('bndbox').find('ymin').text)
@@ -83,8 +115,11 @@ class CustomDataset(Dataset):
                 if xmin >= xmax or ymin >= ymax:
                     invalid_bbox = True
                     break
+                
+                has_valid_object = True
 
-            if invalid_bbox:
+            # Remove if invalid bbox OR no valid objects after filtering
+            if invalid_bbox or not has_valid_object:
                 problematic_images.append(image_name)
                 images_to_remove.append(image_name)
 
@@ -98,7 +133,7 @@ class CustomDataset(Dataset):
 
         # Print warnings for problematic images
         if problematic_images:
-            print("\n⚠️ The following images have invalid bounding boxes and will be removed:")
+            print("\n⚠️ The following images have issues and will be removed:")
             for img in problematic_images:
                 print(f"⚠️ {img}")
 
@@ -152,13 +187,18 @@ class CustomDataset(Dataset):
         image_height = image.shape[0]
                 
         # Box coordinates for xml files are extracted and corrected for image size given.
-        # try:
         tree = et.parse(annot_file_path)
         root = tree.getroot()
         for member in root.findall('object'):
-            # Map the current object name to `classes` list to get
-            # the label index and append to `labels` list.
-            labels.append(self.classes.index(member.find('name').text))
+            # ⭐ FIXED: Case-insensitive class matching with unknown class filtering
+            class_name = member.find('name').text
+            class_idx = self._get_class_index(class_name)
+            
+            # Skip unknown classes (filter them out silently)
+            if class_idx is None:
+                continue
+            
+            labels.append(class_idx)
             
             # xmin = left corner x-coordinates
             xmin = float(member.find('bndbox').find('xmin').text)
@@ -199,8 +239,7 @@ class CustomDataset(Dataset):
             )
             
             boxes.append([xmin_final, ymin_final, xmax_final, ymax_final])
-        # except:
-        #     pass
+
         # Bounding box to tensor.
         boxes_length = len(boxes)
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
@@ -309,30 +348,10 @@ class CustomDataset(Dataset):
             xmax = width
         if xmax - xmin <= 1.0:
             if orig_data:
-                # print(
-                    # '\n',
-                    # '!!! xmax is equal to xmin in data annotations !!!'
-                    # 'Please check data'
-                # )
-                # print(
-                    # 'Increasing xmax by 1 pixel to continue training for now...',
-                    # 'THIS WILL ONLY BE LOGGED ONCE',
-                    # '\n'
-                # )
                 self.log_annot_issue_x = False
             xmin = xmin - 1
         if ymax - ymin <= 1.0:
             if orig_data:
-                # print(
-                #     '\n',
-                #     '!!! ymax is equal to ymin in data annotations !!!',
-                #     'Please check data'
-                # )
-                # print(
-                #     'Increasing ymax by 1 pixel to continue training for now...',
-                #     'THIS WILL ONLY BE LOGGED ONCE',
-                #     '\n'
-                # )
                 self.log_annot_issue_y = False
             ymin = ymin - 1
         return xmin, ymin, xmax, ymax
