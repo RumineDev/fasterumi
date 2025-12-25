@@ -16,25 +16,122 @@ def resize(im, img_size=640, square=False):
             im = cv2.resize(im, (int(w0 * r), int(h0 * r)))
     return im
 
-# Define the training tranforms
+# Define the training tranforms - FIRE & SMOKE OPTIMIZED (NO RANDOMGAMMA!)
 def get_train_aug():
+    """
+    Fire and smoke detection augmentations - PRODUCTION SAFE
+    
+    ⚠️ CRITICAL: NO RandomGamma (causes NaN due to negative pixel values)
+    
+    Augmentations based on training config:
+    - Geometric: Flip (H/V), Rotation (-10° to +10°), Scale
+    - Lighting: Brightness (-15% to +15%), Exposure (-10% to +10%)
+    - Color: HSV, ColorJitter (fire/smoke colors)
+    - Effects: Blur (smoke), Noise, Weather
+    """
     return A.Compose([
+        # ========================================
+        # GEOMETRIC TRANSFORMS
+        # ========================================
+        A.HorizontalFlip(p=0.5),
+        A.VerticalFlip(p=0.3),
+        
+        # Rotation: -10° to +10°
+        A.Rotate(limit=10, p=0.5, border_mode=0),
+        
+        # Scale variations
         A.OneOf([
-            A.Blur(blur_limit=3, p=0.5),
-            A.MotionBlur(blur_limit=3, p=0.5),
-            A.MedianBlur(blur_limit=3, p=0.5),
+            A.RandomScale(scale_limit=0.2, p=0.5),
+            A.ShiftScaleRotate(
+                shift_limit=0.0625,
+                scale_limit=0.15,
+                rotate_limit=10,
+                border_mode=0,
+                p=0.5
+            ),
+        ], p=0.4),
+        
+        # ========================================
+        # BRIGHTNESS & CONTRAST (-15% to +15%)
+        # ========================================
+        A.OneOf([
+            A.RandomBrightnessContrast(
+                brightness_limit=0.15,  # -15% to +15%
+                contrast_limit=0.15,
+                p=0.5
+            ),
+            A.CLAHE(clip_limit=2.5, p=0.4),
+        ], p=0.6),
+        
+        # ========================================
+        # EXPOSURE (-10% to +10%)
+        # ========================================
+        A.RandomBrightnessContrast(
+            brightness_limit=0.1,  # Simulates exposure
+            contrast_limit=0.0,
+            p=0.3
+        ),
+        
+        # ========================================
+        # COLOR VARIATIONS (fire/smoke specific)
+        # ========================================
+        A.OneOf([
+            A.ColorJitter(
+                brightness=0.1,
+                contrast=0.1,
+                saturation=0.15,  # Fire colors
+                hue=0.08,
+                p=0.5
+            ),
+            A.HueSaturationValue(
+                hue_shift_limit=10,
+                sat_shift_limit=15,
+                val_shift_limit=10,
+                p=0.5
+            ),
         ], p=0.5),
-        A.ToGray(p=0.1),
-        A.RandomBrightnessContrast(p=0.1),
-        A.ColorJitter(p=0.1),
-        A.RandomGamma(p=0.1),
+        
+        # ========================================
+        # BLUR EFFECTS (smoke simulation)
+        # ========================================
+        A.OneOf([
+            A.Blur(blur_limit=4, p=0.5),
+            A.MotionBlur(blur_limit=4, p=0.5),
+            A.MedianBlur(blur_limit=3, p=0.3),
+            A.GaussianBlur(blur_limit=4, p=0.5),
+        ], p=0.4),
+        
+        # ========================================
+        # NOISE (realistic camera)
+        # ========================================
+        A.OneOf([
+            A.GaussNoise(var_limit=(5.0, 25.0), p=0.5),
+            A.ISONoise(color_shift=(0.01, 0.03), intensity=(0.1, 0.3), p=0.3),
+        ], p=0.25),
+        
+        # ========================================
+        # WEATHER/LIGHTING (fire/smoke scenarios)
+        # ========================================
+        A.OneOf([
+            A.RandomFog(fog_coef_lower=0.1, fog_coef_upper=0.3, p=0.3),
+            A.RandomShadow(p=0.2),
+        ], p=0.15),
+        
+        # Grayscale (rare, for robustness)
+        A.ToGray(p=0.05),
+        
+        # Convert to tensor (ALWAYS LAST)
         ToTensorV2(p=1.0),
+        
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
         label_fields=['labels'],
+        min_visibility=0.3,
+        min_area=100.0,
     ))
 
 def get_train_transform():
+    """Basic transform without augmentation"""
     return A.Compose([
         ToTensorV2(p=1.0),
     ], bbox_params=A.BboxParams(
@@ -75,6 +172,7 @@ def transform_mosaic(mosaic, boxes, img_size=640):
 
 # Define the validation transforms
 def get_valid_transform():
+    """Validation transform (no augmentation)"""
     return A.Compose([
         ToTensorV2(p=1.0),
     ], bbox_params=A.BboxParams(
@@ -83,6 +181,7 @@ def get_valid_transform():
     ))
 
 def infer_transforms(image):
+    """Inference transforms for single images"""
     # Define the torchvision image transforms.
     transform = transforms.Compose([
         transforms.ToPILImage(),
