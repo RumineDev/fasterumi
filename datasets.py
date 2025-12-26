@@ -47,7 +47,7 @@ class CustomDataset(Dataset):
         self.log_annot_issue_y = True
         self.label_type = label_type
         
-        # ⭐ NEW: Case-insensitive class mapping (matches Cell 4 validation logic)
+        # Case-insensitive class mapping
         self.class_map = self._build_case_insensitive_class_map()
         
         # get all the image paths in sorted order
@@ -61,11 +61,7 @@ class CustomDataset(Dataset):
             self.read_and_clean()
 
     def _build_case_insensitive_class_map(self):
-        """
-        Build case-insensitive class mapping.
-        Maps normalized class names (lowercase) to their indices.
-        Compatible with Cell 4's SmartClassValidator logic.
-        """
+        """Build case-insensitive class mapping."""
         class_map = {}
         for idx, class_name in enumerate(self.classes):
             normalized_name = str(class_name).lower().strip()
@@ -73,10 +69,7 @@ class CustomDataset(Dataset):
         return class_map
 
     def _get_class_index(self, class_name):
-        """
-        Get class index with case-insensitive matching.
-        Returns None if class not found (filters unknown classes).
-        """
+        """Get class index with case-insensitive matching."""
         normalized = str(class_name).lower().strip()
         return self.class_map.get(normalized, None)
 
@@ -122,12 +115,10 @@ class CustomDataset(Dataset):
                     img_width = float(size.find('width').text)
                     img_height = float(size.find('height').text)
                 except:
-                    # If size info is corrupted, skip this image
                     images_to_remove.append(image_name)
                     stats['invalid_bbox'].append((image_name, "Corrupted size info in XML"))
                     continue
             else:
-                # If no size info, skip this image
                 images_to_remove.append(image_name)
                 stats['invalid_bbox'].append((image_name, "No image size in XML"))
                 continue
@@ -136,7 +127,7 @@ class CustomDataset(Dataset):
             has_valid_object = False
 
             for member in root.findall('object'):
-                # ⭐ Check class validity first (case-insensitive)
+                # Check class validity first
                 class_name = member.find('name').text
                 class_idx = self._get_class_index(class_name)
                 
@@ -153,7 +144,7 @@ class CustomDataset(Dataset):
                     ymin = float(bbox.find('ymin').text)
                     ymax = float(bbox.find('ymax').text)
                     
-                    # ⭐ STRICT VALIDATION - Fix negative/invalid coords
+                    # STRICT VALIDATION
                     
                     # 1. Check for invalid bbox structure
                     if xmin >= xmax or ymin >= ymax:
@@ -168,7 +159,7 @@ class CustomDataset(Dataset):
                         break
                     
                     # 3. Check for out of bounds (with small tolerance)
-                    tolerance = 1.0  # Allow 1px tolerance
+                    tolerance = 1.0
                     if xmin >= img_width or ymin >= img_height or xmax > (img_width + tolerance) or ymax > (img_height + tolerance):
                         stats['out_of_bounds'].append((image_name, f"OOB: [{xmin:.0f}, {ymin:.0f}, {xmax:.0f}, {ymax:.0f}] vs img [{img_width:.0f}, {img_height:.0f}]"))
                         invalid_bbox = True
@@ -206,7 +197,7 @@ class CustomDataset(Dataset):
             )
         ]
 
-        # ⭐ TRUNCATED REPORTING
+        # TRUNCATED REPORTING
         print("\n" + "="*80)
         print("📊 DATASET VALIDATION REPORT (TRUNCATED)")
         print("="*80)
@@ -286,9 +277,9 @@ class CustomDataset(Dataset):
         if square:
             im = cv2.resize(im, (self.img_size, self.img_size))
         else:
-            h0, w0 = im.shape[:2]  # orig hw
-            r = self.img_size / max(h0, w0)  # ratio
-            if r != 1:  # if sizes are not equal
+            h0, w0 = im.shape[:2]
+            r = self.img_size / max(h0, w0)
+            if r != 1:
                 im = cv2.resize(im, (int(w0 * r), int(h0 * r)))
         return im
 
@@ -333,23 +324,19 @@ class CustomDataset(Dataset):
         tree = et.parse(annot_file_path)
         root = tree.getroot()
         for member in root.findall('object'):
-            # ⭐ FIXED: Case-insensitive class matching with unknown class filtering
+            # Case-insensitive class matching with unknown class filtering
             class_name = member.find('name').text
             class_idx = self._get_class_index(class_name)
             
-            # Skip unknown classes (filter them out silently)
+            # Skip unknown classes
             if class_idx is None:
                 continue
             
             labels.append(class_idx)
             
-            # xmin = left corner x-coordinates
             xmin = float(member.find('bndbox').find('xmin').text)
-            # xmax = right corner x-coordinates
             xmax = float(member.find('bndbox').find('xmax').text)
-            # ymin = left corner y-coordinates
             ymin = float(member.find('bndbox').find('ymin').text)
-            # ymax = right corner y-coordinates
             ymax = float(member.find('bndbox').find('ymax').text)
 
             xmin, ymin, xmax, ymax = self.check_image_and_annotation(
@@ -364,8 +351,7 @@ class CustomDataset(Dataset):
 
             orig_boxes.append([xmin, ymin, xmax, ymax])
             
-            # Resize the bounding boxes according to the
-            # desired `width`, `height`.
+            # Resize the bounding boxes
             xmin_final = (xmin/image_width)*image_resized.shape[1]
             xmax_final = (xmax/image_width)*image_resized.shape[1]
             ymin_final = (ymin/image_height)*image_resized.shape[0]
@@ -386,11 +372,8 @@ class CustomDataset(Dataset):
         # Bounding box to tensor.
         boxes_length = len(boxes)
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
-        # Area of the bounding boxes.
         area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) if boxes_length > 0 else torch.as_tensor(boxes, dtype=torch.float32)
-        # No crowd instances.
         iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64) if boxes_length > 0 else torch.as_tensor(boxes, dtype=torch.float32)
-        # Labels to tensor.
         labels = torch.as_tensor(labels, dtype=torch.int64)
 
         return image, image_resized, orig_boxes, \
@@ -439,8 +422,7 @@ class CustomDataset(Dataset):
 
             orig_boxes.append([xmin, ymin, xmax, ymax])
 
-            # Resize the bounding boxes according to the
-            # desired `width`, `height`.
+            # Resize the bounding boxes
             xmin_final = (xmin/image_width)*image_resized.shape[1]
             xmax_final = (xmax/image_width)*image_resized.shape[1]
             ymin_final = (ymin/image_height)*image_resized.shape[0]
@@ -461,11 +443,8 @@ class CustomDataset(Dataset):
         # Bounding box to tensor.
         boxes_length = len(boxes)
         boxes = torch.as_tensor(boxes, dtype=torch.float32)
-        # Area of the bounding boxes.
         area = (boxes[:, 3] - boxes[:, 1]) * (boxes[:, 2] - boxes[:, 0]) if boxes_length > 0 else torch.as_tensor(boxes, dtype=torch.float32)
-        # No crowd instances.
         iscrowd = torch.zeros((boxes.shape[0],), dtype=torch.int64) if boxes_length > 0 else torch.as_tensor(boxes, dtype=torch.float32)
-        # Labels to tensor.
         labels = torch.as_tensor(labels, dtype=torch.int64)
 
         return image, image_resized, orig_boxes, \
@@ -485,7 +464,7 @@ class CustomDataset(Dataset):
         Enhanced version with STRICT coordinate validation.
         Prevents negative coordinates and out-of-bounds issues.
         """
-        # ⭐ CRITICAL: Clamp all coordinates to valid range [0, width/height]
+        # CRITICAL: Clamp all coordinates to valid range [0, width/height]
         xmin = max(0.0, min(xmin, width - 1.0))
         ymin = max(0.0, min(ymin, height - 1.0))
         xmax = max(0.0, min(xmax, width))
@@ -507,21 +486,17 @@ class CustomDataset(Dataset):
         # Ensure minimum size (at least 1 pixel)
         if xmax - xmin <= 1.0:
             if orig_data and self.log_annot_issue_x:
-                # Only log once to avoid spam
                 self.log_annot_issue_x = False
-            # Expand bbox slightly
             xmin = max(0.0, xmin - 0.5)
             xmax = min(width, xmax + 0.5)
         
         if ymax - ymin <= 1.0:
             if orig_data and self.log_annot_issue_y:
-                # Only log once to avoid spam
                 self.log_annot_issue_y = False
-            # Expand bbox slightly
             ymin = max(0.0, ymin - 0.5)
             ymax = min(height, ymax + 0.5)
         
-        # Final safety clamp (ensure no negative values escape)
+        # Final safety clamp
         xmin = max(0.0, xmin)
         ymin = max(0.0, ymin)
         xmax = min(width, xmax)
@@ -529,17 +504,14 @@ class CustomDataset(Dataset):
         
         return xmin, ymin, xmax, ymax
 
-
     def load_cutmix_image_and_boxes(self, index, resize_factor=512):
         """ 
         Adapted from: https://www.kaggle.com/shonenkov/oof-evaluation-mixup-efficientdet
         """
         s = self.img_size
-        yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)  # mosaic center x, y
+        yc, xc = (int(random.uniform(-x, 2 * s + x)) for x in self.mosaic_border)
         indices = [index] + [random.randint(0, len(self.all_images) - 1) for _ in range(3)]
 
-        # Create empty image with the above resized image.
-        # result_image = np.full((h, w, 3), 1, dtype=np.float32)
         result_boxes = []
         result_classes = []
 
@@ -552,17 +524,16 @@ class CustomDataset(Dataset):
             h, w = image_resized.shape[:2]
 
             if i == 0:
-                # Create empty image with the above resized image.
-                result_image = np.full((s * 2, s * 2, image_resized.shape[2]), 114/255, dtype=np.float32)  # base image with 4 tiles
-                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc  # xmin, ymin, xmax, ymax (large image)
-                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h  # xmin, ymin, xmax, ymax (small image)
-            elif i == 1:  # top right
+                result_image = np.full((s * 2, s * 2, image_resized.shape[2]), 114/255, dtype=np.float32)
+                x1a, y1a, x2a, y2a = max(xc - w, 0), max(yc - h, 0), xc, yc
+                x1b, y1b, x2b, y2b = w - (x2a - x1a), h - (y2a - y1a), w, h
+            elif i == 1:
                 x1a, y1a, x2a, y2a = xc, max(yc - h, 0), min(xc + w, s * 2), yc
                 x1b, y1b, x2b, y2b = 0, h - (y2a - y1a), min(w, x2a - x1a), h
-            elif i == 2:  # bottom left
+            elif i == 2:
                 x1a, y1a, x2a, y2a = max(xc - w, 0), yc, xc, min(s * 2, yc + h)
                 x1b, y1b, x2b, y2b = w - (x2a - x1a), 0, max(xc, w), min(y2a - y1a, h)
-            elif i == 3:  # bottom right
+            elif i == 3:
                 x1a, y1a, x2a, y2a = xc, yc, min(xc + w, s * 2), min(s * 2, yc + h)
                 x1b, y1b, x2b, y2b = 0, 0, min(w, x2a - x1a), min(y2a - y1a, h)
             result_image[y1a:y2a, x1a:x2a] = image_resized[y1b:y2b, x1b:x2b]
@@ -596,8 +567,55 @@ class CustomDataset(Dataset):
         return result_image, torch.tensor(result_boxes), \
             torch.tensor(np.array(final_classes)), area, iscrowd, dims
 
+    def validate_boxes_post_augmentation(self, boxes, image_shape):
+        """
+        ⭐ NEW: Post-augmentation validation to filter invalid boxes.
+        This is the CRITICAL fix that prevents PyTorch assertion errors.
+        
+        Args:
+            boxes: Tensor or list of bounding boxes [xmin, ymin, xmax, ymax]
+            image_shape: Tuple (height, width) of the image
+            
+        Returns:
+            valid_mask: Boolean mask for valid boxes
+        """
+        if len(boxes) == 0:
+            return torch.ones(0, dtype=torch.bool)
+        
+        # Convert to numpy for easier manipulation
+        if isinstance(boxes, torch.Tensor):
+            boxes_np = boxes.cpu().numpy()
+        else:
+            boxes_np = np.array(boxes)
+        
+        height, width = image_shape[:2]
+        
+        # Create validity mask
+        valid_mask = np.ones(len(boxes_np), dtype=bool)
+        
+        for i, box in enumerate(boxes_np):
+            xmin, ymin, xmax, ymax = box
+            
+            # Check 1: Positive dimensions (CRITICAL for PyTorch assertion)
+            if xmax <= xmin or ymax <= ymin:
+                valid_mask[i] = False
+                continue
+            
+            # Check 2: Within image bounds (with small tolerance)
+            if xmin < 0 or ymin < 0 or xmax > width or ymax > height:
+                valid_mask[i] = False
+                continue
+            
+            # Check 3: Minimum area (avoid tiny boxes)
+            area = (xmax - xmin) * (ymax - ymin)
+            if area < 1.0:
+                valid_mask[i] = False
+                continue
+        
+        return torch.tensor(valid_mask, dtype=torch.bool)
+
     def __getitem__(self, idx):
-        if not self.train: # No mosaic during validation.
+        if not self.train:
             image, image_resized, orig_boxes, boxes, \
                 labels, area, iscrowd, dims = self.load_image_and_labels(
                 index=idx
@@ -629,24 +647,66 @@ class CustomDataset(Dataset):
         labels = labels.cpu().numpy().tolist() if isinstance(labels, torch.Tensor) else labels
         bboxes = target['boxes'].cpu().numpy().tolist() if isinstance(target['boxes'], torch.Tensor) else target['boxes'].tolist()
 
-        if self.use_train_aug: # Use train augmentation if argument is passed.
-            train_aug = get_train_aug()
-            sample = train_aug(image=image_resized,
-                                     bboxes=bboxes,
-                                     labels=labels)
-            image_resized = sample['image']
-            target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.int64)
-        else:
-            sample = self.transforms(image=image_resized,
-                                     bboxes=target['boxes'],
-                                     labels=labels)
-            image_resized = sample['image']
-            target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.int64)
+        # ⭐ CRITICAL FIX: Apply augmentation with robust error handling
+        try:
+            if self.use_train_aug:
+                train_aug = get_train_aug()
+                sample = train_aug(image=image_resized,
+                                         bboxes=bboxes,
+                                         labels=labels)
+                image_resized = sample['image']
+                target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
+            else:
+                sample = self.transforms(image=image_resized,
+                                         bboxes=target['boxes'],
+                                         labels=labels)
+                image_resized = sample['image']
+                target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
+        except Exception as e:
+            # If augmentation fails, return empty sample
+            print(f"⚠️  Augmentation failed for image {idx}: {e}")
+            target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+            target['labels'] = torch.zeros(0, dtype=torch.int64)
+            target['area'] = torch.zeros(0, dtype=torch.float32)
+            target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+            return image_resized, target
 
-        # Fix to enable training without target bounding boxes,
-        # see https://discuss.pytorch.org/t/fasterrcnn-images-with-no-objects-present-cause-an-error/117974/4
+        # ⭐ POST-AUGMENTATION VALIDATION (THE CRITICAL FIX!)
+        # This filters out boxes that became invalid after augmentation
+        if len(target['boxes']) > 0:
+            valid_mask = self.validate_boxes_post_augmentation(
+                target['boxes'], 
+                image_resized.shape[1:]  # (H, W)
+            )
+            
+            # Filter out invalid boxes
+            if valid_mask.sum() == 0:
+                # All boxes invalid - return empty sample
+                target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                target['labels'] = torch.zeros(0, dtype=torch.int64)
+                target['area'] = torch.zeros(0, dtype=torch.float32)
+                target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+            else:
+                # Keep only valid boxes
+                target['boxes'] = target['boxes'][valid_mask]
+                target['labels'] = target['labels'][valid_mask]
+                
+                # Recalculate area for valid boxes
+                if len(target['boxes']) > 0:
+                    target['area'] = (target['boxes'][:, 3] - target['boxes'][:, 1]) * \
+                                    (target['boxes'][:, 2] - target['boxes'][:, 0])
+                    target['iscrowd'] = torch.zeros(len(target['boxes']), dtype=torch.int64)
+                else:
+                    target['area'] = torch.zeros(0, dtype=torch.float32)
+                    target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+
+        # Final safety check for NaN or invalid tensors
         if np.isnan((target['boxes']).numpy()).any() or target['boxes'].shape == torch.Size([0]):
-            target['boxes'] = torch.zeros((0, 4), dtype=torch.int64)
+            target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+            target['labels'] = torch.zeros(0, dtype=torch.int64)
+            target['area'] = torch.zeros(0, dtype=torch.float32)
+            target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+            
         return image_resized, target
 
     def __len__(self):
@@ -683,6 +743,7 @@ def create_train_dataset(
         label_type=label_type
     )
     return train_dataset
+
 def create_valid_dataset(
     valid_dir_images, 
     valid_dir_labels, 
@@ -709,7 +770,6 @@ def create_train_loader(
     train_loader = DataLoader(
         train_dataset,
         batch_size=batch_size,
-        # shuffle=True,
         num_workers=num_workers,
         collate_fn=collate_fn,
         sampler=batch_sampler
