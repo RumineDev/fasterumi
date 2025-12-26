@@ -615,115 +615,118 @@ class CustomDataset(Dataset):
         return torch.tensor(valid_mask, dtype=torch.bool)
 
     def __getitem__(self, idx):
-        if not self.train:
-            image, image_resized, orig_boxes, boxes, \
-                labels, area, iscrowd, dims = self.load_image_and_labels(
-                index=idx
-            )
-
-        if self.train: 
-            mosaic_prob = random.uniform(0.0, 1.0)
-            if self.mosaic >= mosaic_prob:
-                image_resized, boxes, labels, \
-                    area, iscrowd, dims = self.load_cutmix_image_and_boxes(
-                    idx, resize_factor=(self.img_size, self.img_size)
-                )
-            else:
+            if not self.train:
                 image, image_resized, orig_boxes, boxes, \
                     labels, area, iscrowd, dims = self.load_image_and_labels(
                     index=idx
                 )
 
-        # Prepare the final `target` dictionary.
-        target = {}
-        target["boxes"] = boxes
-        target["labels"] = labels
-        target["area"] = area
-        target["iscrowd"] = iscrowd
-        image_id = torch.tensor([idx])
-        target["image_id"] = image_id
+            if self.train: 
+                mosaic_prob = random.uniform(0.0, 1.0)
+                if self.mosaic >= mosaic_prob:
+                    image_resized, boxes, labels, \
+                        area, iscrowd, dims = self.load_cutmix_image_and_boxes(
+                        idx, resize_factor=(self.img_size, self.img_size)
+                    )
+                else:
+                    image, image_resized, orig_boxes, boxes, \
+                        labels, area, iscrowd, dims = self.load_image_and_labels(
+                        index=idx
+                    )
 
-        # ⭐ CRITICAL FIX: Ensure labels and boxes have same length BEFORE augmentation
-        if len(target['boxes']) != len(target['labels']):
-            # This should never happen, but as a safety measure
-            min_len = min(len(target['boxes']), len(target['labels']))
-            target['boxes'] = target['boxes'][:min_len]
-            target['labels'] = target['labels'][:min_len]
+            # Prepare the final `target` dictionary.
+            target = {}
+            target["boxes"] = boxes
+            target["labels"] = labels
+            target["area"] = area
+            target["iscrowd"] = iscrowd
+            image_id = torch.tensor([idx])
+            target["image_id"] = image_id
 
-        # Before transformation - convert to list format for albumentations
-        labels = target['labels'].cpu().numpy().tolist() if isinstance(target['labels'], torch.Tensor) else target['labels']
-        bboxes = target['boxes'].cpu().numpy().tolist() if isinstance(target['boxes'], torch.Tensor) else target['boxes'].tolist()
-
-        # ⭐ CRITICAL FIX: Apply augmentation with robust error handling
-        try:
-            if self.use_train_aug:
-                train_aug = get_train_aug()
-                sample = train_aug(image=image_resized,
-                                         bboxes=bboxes,
-                                         labels=labels)
-                image_resized = sample['image']
-                target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
-            else:
-                sample = self.transforms(image=image_resized,
-                                         bboxes=bboxes,
-                                         labels=labels)
-                image_resized = sample['image']
-                target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
-        except Exception as e:
-            # If augmentation fails, return empty sample
-            print(f"⚠️  Augmentation failed for image {idx}: {e}")
-            target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
-            target['labels'] = torch.zeros(0, dtype=torch.int64)
-            target['area'] = torch.zeros(0, dtype=torch.float32)
-            target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
-            return image_resized, target
-
-        # ⭐ POST-AUGMENTATION VALIDATION (THE CRITICAL FIX!)
-        # This filters out boxes that became invalid after augmentation
-        if len(target['boxes']) > 0:
-            valid_mask = self.validate_boxes_post_augmentation(
-                target['boxes'], 
-                image_resized.shape[1:]  # (H, W)
-            )
-            
-            # ⭐ CRITICAL: Ensure mask length matches both boxes AND labels
-            # This is where the original error occurred
-            if len(valid_mask) != len(target['boxes']):
-                # Mask length mismatch - use minimum length
-                min_len = min(len(valid_mask), len(target['boxes']), len(target['labels']))
-                valid_mask = valid_mask[:min_len]
+            # ⭐ CRITICAL FIX: Ensure labels and boxes have same length BEFORE augmentation
+            if len(target['boxes']) != len(target['labels']):
+                min_len = min(len(target['boxes']), len(target['labels']))
                 target['boxes'] = target['boxes'][:min_len]
                 target['labels'] = target['labels'][:min_len]
-            
-            # Filter out invalid boxes
-            if valid_mask.sum() == 0:
-                # All boxes invalid - return empty sample
+
+            # ⭐ CONVERT TO LIST FORMAT BEFORE AUGMENTATION
+            labels = target['labels'].cpu().numpy().tolist() if isinstance(target['labels'], torch.Tensor) else target['labels']
+            bboxes = target['boxes'].cpu().numpy().tolist() if isinstance(target['boxes'], torch.Tensor) else target['boxes'].tolist()
+
+            # ⭐ CRITICAL FIX: Apply augmentation with robust error handling
+            try:
+                if self.use_train_aug:
+                    train_aug = get_train_aug()
+                    sample = train_aug(image=image_resized,
+                                            bboxes=bboxes,
+                                            labels=labels)
+                    image_resized = sample['image']
+                    # ⭐ FIX: Update both boxes AND labels from augmentation result
+                    target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
+                    target['labels'] = torch.tensor(sample['labels'], dtype=torch.int64)
+                else:
+                    sample = self.transforms(image=image_resized,
+                                            bboxes=bboxes,
+                                            labels=labels)
+                    image_resized = sample['image']
+                    # ⭐ FIX: Update both boxes AND labels from augmentation result
+                    target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
+                    target['labels'] = torch.tensor(sample['labels'], dtype=torch.int64)
+            except Exception as e:
+                # If augmentation fails, return empty sample
+                print(f"⚠️  Augmentation failed for image {idx}: {e}")
                 target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
                 target['labels'] = torch.zeros(0, dtype=torch.int64)
                 target['area'] = torch.zeros(0, dtype=torch.float32)
                 target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
-            else:
-                # Keep only valid boxes
-                target['boxes'] = target['boxes'][valid_mask]
-                target['labels'] = target['labels'][valid_mask]
+                return image_resized, target
+
+            # ⭐ POST-AUGMENTATION VALIDATION (THE CRITICAL FIX!)
+            # Now validate AFTER we have synced boxes and labels
+            if len(target['boxes']) > 0:
+                valid_mask = self.validate_boxes_post_augmentation(
+                    target['boxes'], 
+                    image_resized.shape[1:]  # (H, W)
+                )
                 
-                # Recalculate area for valid boxes
-                if len(target['boxes']) > 0:
-                    target['area'] = (target['boxes'][:, 3] - target['boxes'][:, 1]) * \
-                                    (target['boxes'][:, 2] - target['boxes'][:, 0])
-                    target['iscrowd'] = torch.zeros(len(target['boxes']), dtype=torch.int64)
-                else:
+                # ⭐ CRITICAL: Both boxes and labels are already synced from augmentation
+                # So valid_mask length should match both
+                if len(valid_mask) != len(target['boxes']) or len(valid_mask) != len(target['labels']):
+                    # Defensive: This should NOT happen, but handle it anyway
+                    min_len = min(len(valid_mask), len(target['boxes']), len(target['labels']))
+                    valid_mask = valid_mask[:min_len]
+                    target['boxes'] = target['boxes'][:min_len]
+                    target['labels'] = target['labels'][:min_len]
+                
+                # Filter out invalid boxes
+                if valid_mask.sum() == 0:
+                    # All boxes invalid - return empty sample
+                    target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                    target['labels'] = torch.zeros(0, dtype=torch.int64)
                     target['area'] = torch.zeros(0, dtype=torch.float32)
                     target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+                else:
+                    # Keep only valid boxes
+                    target['boxes'] = target['boxes'][valid_mask]
+                    target['labels'] = target['labels'][valid_mask]
+                    
+                    # Recalculate area for valid boxes
+                    if len(target['boxes']) > 0:
+                        target['area'] = (target['boxes'][:, 3] - target['boxes'][:, 1]) * \
+                                        (target['boxes'][:, 2] - target['boxes'][:, 0])
+                        target['iscrowd'] = torch.zeros(len(target['boxes']), dtype=torch.int64)
+                    else:
+                        target['area'] = torch.zeros(0, dtype=torch.float32)
+                        target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
 
-        # Final safety check for NaN or invalid tensors
-        if len(target['boxes']) > 0 and (np.isnan((target['boxes']).numpy()).any() or target['boxes'].shape == torch.Size([0])):
-            target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
-            target['labels'] = torch.zeros(0, dtype=torch.int64)
-            target['area'] = torch.zeros(0, dtype=torch.float32)
-            target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
-            
-        return image_resized, target
+            # Final safety check for NaN or invalid tensors
+            if len(target['boxes']) > 0 and (np.isnan((target['boxes']).numpy()).any() or target['boxes'].shape == torch.Size([0])):
+                target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
+                target['labels'] = torch.zeros(0, dtype=torch.int64)
+                target['area'] = torch.zeros(0, dtype=torch.float32)
+                target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
+                
+            return image_resized, target
 
     def __len__(self):
         return len(self.all_images)
