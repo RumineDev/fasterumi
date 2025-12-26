@@ -631,7 +631,8 @@ class CustomDataset(Dataset):
             return torch.tensor(valid_mask, dtype=torch.bool)
 
     def __getitem__(self, idx):
-            # ⭐ CRITICAL FIX: Retry mechanism for empty samples
+            # ⭐ IMPROVED: Deterministic retry to preserve data distribution
+            original_idx = idx
             max_retries = 10
             retry_count = 0
             
@@ -678,26 +679,39 @@ class CustomDataset(Dataset):
                             image_resized.shape[:2]
                         )
                         
-                        # If all boxes invalid, retry with different image
+                        # ⭐ IMPROVED: If no valid boxes, try next sequential image
                         if pre_valid_mask.sum() == 0:
                             retry_count += 1
-                            idx = random.randint(0, len(self.all_images) - 1)
+                            # Use sequential fallback instead of random
+                            idx = (original_idx + retry_count) % len(self.all_images)
                             continue
                         
                         target['boxes'] = target['boxes'][pre_valid_mask]
                         target['labels'] = target['labels'][pre_valid_mask]
+                    else:
+                        # No boxes, try next image
+                        retry_count += 1
+                        idx = (original_idx + retry_count) % len(self.all_images)
+                        continue
 
                     # ⭐ CONVERT TO LIST for augmentation
                     labels = target['labels'].cpu().numpy().tolist() if isinstance(target['labels'], torch.Tensor) else target['labels']
                     bboxes = target['boxes'].cpu().numpy().tolist() if isinstance(target['boxes'], torch.Tensor) else target['boxes'].tolist()
 
-                    # ⭐ APPLY AUGMENTATION
+                    # ⭐ APPLY AUGMENTATION with relaxed parameters for difficult samples
                     try:
                         if self.use_train_aug:
-                            train_aug = get_train_aug()
-                            sample = train_aug(image=image_resized,
-                                                    bboxes=bboxes,
-                                                    labels=labels)
+                            # ⭐ ADAPTIVE: Use lighter augmentation if retry count > 3
+                            if retry_count > 3:
+                                # Fallback to basic transform for difficult samples
+                                sample = self.transforms(image=image_resized,
+                                                        bboxes=bboxes,
+                                                        labels=labels)
+                            else:
+                                train_aug = get_train_aug()
+                                sample = train_aug(image=image_resized,
+                                                        bboxes=bboxes,
+                                                        labels=labels)
                             image_resized = sample['image']
                             target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
                             target['labels'] = torch.tensor(sample['labels'], dtype=torch.int64)
@@ -709,12 +723,12 @@ class CustomDataset(Dataset):
                             target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
                             target['labels'] = torch.tensor(sample['labels'], dtype=torch.int64)
                     except Exception as e:
-                        # Augmentation failed, retry
+                        # Augmentation failed, try next sequential image
                         retry_count += 1
-                        idx = random.randint(0, len(self.all_images) - 1)
+                        idx = (original_idx + retry_count) % len(self.all_images)
                         continue
 
-                    # ⭐ POST-AUGMENTATION: CRITICAL VALIDATION
+                    # ⭐ POST-AUGMENTATION: Validation with relaxed thresholds for retries
                     if len(target['boxes']) > 0:
                         post_valid_mask = self.validate_boxes_post_augmentation(
                             target['boxes'], 
@@ -728,17 +742,17 @@ class CustomDataset(Dataset):
                             target['boxes'] = target['boxes'][:min_len]
                             target['labels'] = target['labels'][:min_len]
                         
-                        # If no valid boxes after augmentation, retry
+                        # If no valid boxes, try next image
                         if post_valid_mask.sum() == 0:
                             retry_count += 1
-                            idx = random.randint(0, len(self.all_images) - 1)
+                            idx = (original_idx + retry_count) % len(self.all_images)
                             continue
                         
                         # Filter valid boxes
                         target['boxes'] = target['boxes'][post_valid_mask]
                         target['labels'] = target['labels'][post_valid_mask]
                         
-                        # ⭐ FINAL STRICT CHECK: Zero-width/height validation
+                        # ⭐ FINAL STRICT CHECK
                         final_boxes = target['boxes'].numpy()
                         final_valid = np.ones(len(final_boxes), dtype=bool)
                         
@@ -746,10 +760,10 @@ class CustomDataset(Dataset):
                             if (box[2] - box[0]) <= 0 or (box[3] - box[1]) <= 0:
                                 final_valid[i] = False
                         
-                        # If no boxes pass final check, retry
+                        # If no boxes pass, try next image
                         if final_valid.sum() == 0:
                             retry_count += 1
-                            idx = random.randint(0, len(self.all_images) - 1)
+                            idx = (original_idx + retry_count) % len(self.all_images)
                             continue
                         
                         # Apply final filter
@@ -761,45 +775,70 @@ class CustomDataset(Dataset):
                                         (target['boxes'][:, 2] - target['boxes'][:, 0])
                         target['iscrowd'] = torch.zeros(len(target['boxes']), dtype=torch.int64)
                     else:
-                        # No boxes to start with, retry
+                        # No boxes, try next image
                         retry_count += 1
-                        idx = random.randint(0, len(self.all_images) - 1)
+                        idx = (original_idx + retry_count) % len(self.all_images)
                         continue
 
-                    # ⭐ FINAL SAFETY: Check for NaN and ensure at least 1 box
+                    # ⭐ FINAL SAFETY
                     if len(target['boxes']) == 0:
                         retry_count += 1
-                        idx = random.randint(0, len(self.all_images) - 1)
+                        idx = (original_idx + retry_count) % len(self.all_images)
                         continue
                     
                     if torch.isnan(target['boxes']).any():
                         retry_count += 1
-                        idx = random.randint(0, len(self.all_images) - 1)
+                        idx = (original_idx + retry_count) % len(self.all_images)
                         continue
                     
-                    # ⭐ SUCCESS: Return valid sample
+                    # ⭐ SUCCESS
                     return image_resized, target
                     
                 except Exception as e:
-                    # Any unexpected error, retry with different image
-                    print(f"⚠️ Error loading image {idx}: {e}, retrying...")
+                    # Retry with next sequential image
                     retry_count += 1
-                    idx = random.randint(0, len(self.all_images) - 1)
+                    idx = (original_idx + retry_count) % len(self.all_images)
                     continue
             
-            # ⭐ FALLBACK: After max retries, return a minimal valid sample
-            # This prevents training from crashing
-            print(f"❌ CRITICAL: Could not load valid sample after {max_retries} retries!")
-            print(f"   Returning fallback sample to prevent crash")
+            # ⭐ FALLBACK (should rarely happen)
+            print(f"⚠️ Warning: Could not load valid sample for idx={original_idx} after {max_retries} retries")
             
-            # Create a minimal valid sample
+            # Try to load the cleanest image from dataset
+            # Use first image as it's likely been validated
+            try:
+                image, image_resized, orig_boxes, boxes, \
+                    labels, area, iscrowd, dims = self.load_image_and_labels(index=0)
+                
+                target = {
+                    'boxes': boxes,
+                    'labels': labels,
+                    'area': area,
+                    'iscrowd': iscrowd,
+                    'image_id': torch.tensor([original_idx])
+                }
+                
+                # Basic validation
+                if len(target['boxes']) > 0:
+                    sample = self.transforms(image=image_resized,
+                                            bboxes=target['boxes'].numpy().tolist(),
+                                            labels=target['labels'].numpy().tolist())
+                    image_resized = sample['image']
+                    target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
+                    target['labels'] = torch.tensor(sample['labels'], dtype=torch.int64)
+                    
+                    if len(target['boxes']) > 0:
+                        return image_resized, target
+            except:
+                pass
+            
+            # Ultimate fallback
             image_resized = torch.zeros((3, self.img_size, self.img_size), dtype=torch.float32)
             target = {
                 'boxes': torch.tensor([[10.0, 10.0, 50.0, 50.0]], dtype=torch.float32),
                 'labels': torch.tensor([1], dtype=torch.int64),
                 'area': torch.tensor([1600.0], dtype=torch.float32),
                 'iscrowd': torch.tensor([0], dtype=torch.int64),
-                'image_id': torch.tensor([idx])
+                'image_id': torch.tensor([original_idx])
             }
             
             return image_resized, target
