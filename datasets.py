@@ -74,10 +74,9 @@ class CustomDataset(Dataset):
         return self.class_map.get(normalized, None)
 
     def read_and_clean(self):
-        """Enhanced validation with truncated output and strict bbox checking"""
-        print('🔍 Checking Labels and Images...')
+        """⭐ AGGRESSIVE CLEANING - Fixes annotations in-place"""
+        print('🔍 Aggressive Dataset Cleaning...')
         images_to_remove = []
-        problematic_images = []
         
         stats = {
             'missing_annotations': [],
@@ -86,7 +85,9 @@ class CustomDataset(Dataset):
             'negative_coords': [],
             'out_of_bounds': [],
             'zero_area': [],
-            'unknown_classes': {}
+            'unknown_classes': {},
+            'total_fixed': 0,
+            'total_removed': 0
         }
 
         for image_name in tqdm(self.all_images, total=len(self.all_images)):
@@ -105,10 +106,10 @@ class CustomDataset(Dataset):
                 root = tree.getroot()
             except Exception as e:
                 images_to_remove.append(image_name)
-                stats['invalid_bbox'].append((image_name, f"Parse error: {e}"))
+                stats['invalid_bbox'].append((image_name, f"Parse error"))
                 continue
             
-            # Get image dimensions for validation
+            # Get image dimensions
             size = root.find('size')
             if size is not None:
                 try:
@@ -116,18 +117,16 @@ class CustomDataset(Dataset):
                     img_height = float(size.find('height').text)
                 except:
                     images_to_remove.append(image_name)
-                    stats['invalid_bbox'].append((image_name, "Corrupted size info in XML"))
                     continue
             else:
                 images_to_remove.append(image_name)
-                stats['invalid_bbox'].append((image_name, "No image size in XML"))
                 continue
             
-            invalid_bbox = False
+            # ⭐ VALIDATE AND FIX BBOXES
             has_valid_object = False
-
+            objects_to_remove = []
+            
             for member in root.findall('object'):
-                # Check class validity first
                 class_name = member.find('name').text
                 class_idx = self._get_class_index(class_name)
                 
@@ -135,6 +134,7 @@ class CustomDataset(Dataset):
                     if class_name not in stats['unknown_classes']:
                         stats['unknown_classes'][class_name] = 0
                     stats['unknown_classes'][class_name] += 1
+                    objects_to_remove.append(member)
                     continue
                 
                 try:
@@ -144,133 +144,86 @@ class CustomDataset(Dataset):
                     ymin = float(bbox.find('ymin').text)
                     ymax = float(bbox.find('ymax').text)
                     
-                    # STRICT VALIDATION
+                    # ⭐ FIX COORDINATES
+                    needs_fix = False
+                    remove_bbox = False
                     
-                    # 1. Check for invalid bbox structure
-                    if xmin >= xmax or ymin >= ymax:
-                        invalid_bbox = True
-                        stats['invalid_bbox'].append((image_name, f"Invalid: xmin={xmin:.2f}, xmax={xmax:.2f}, ymin={ymin:.2f}, ymax={ymax:.2f}"))
-                        break
-                    
-                    # 2. Check for negative coordinates (CRITICAL FIX)
+                    # Fix negative coordinates
                     if xmin < 0 or ymin < 0 or xmax < 0 or ymax < 0:
-                        stats['negative_coords'].append((image_name, f"Negative: [{xmin:.2f}, {ymin:.2f}, {xmax:.2f}, {ymax:.2f}]"))
-                        invalid_bbox = True
-                        break
+                        stats['negative_coords'].append((image_name, f"[{xmin:.0f}, {ymin:.0f}, {xmax:.0f}, {ymax:.0f}]"))
+                        needs_fix = True
+                        xmin = max(0.0, xmin)
+                        ymin = max(0.0, ymin)
+                        xmax = max(0.0, xmax)
+                        ymax = max(0.0, ymax)
                     
-                    # 3. Check for out of bounds (with small tolerance)
-                    tolerance = 1.0
-                    if xmin >= img_width or ymin >= img_height or xmax > (img_width + tolerance) or ymax > (img_height + tolerance):
-                        stats['out_of_bounds'].append((image_name, f"OOB: [{xmin:.0f}, {ymin:.0f}, {xmax:.0f}, {ymax:.0f}] vs img [{img_width:.0f}, {img_height:.0f}]"))
-                        invalid_bbox = True
-                        break
+                    # Fix out of bounds (with 1px tolerance)
+                    if xmax > img_width + 1.0 or ymax > img_height + 1.0:
+                        stats['out_of_bounds'].append((image_name, "OOB"))
+                        needs_fix = True
+                        xmax = min(img_width, xmax)
+                        ymax = min(img_height, ymax)
                     
-                    # 4. Check for zero/tiny area
-                    area = (xmax - xmin) * (ymax - ymin)
-                    if area < 1.0:
-                        stats['zero_area'].append((image_name, f"Area={area:.2f}"))
-                        invalid_bbox = True
-                        break
+                    # Check validity
+                    if xmin >= xmax or ymin >= ymax:
+                        remove_bbox = True
+                    
+                    # Minimum size check (4x4 pixels)
+                    width = xmax - xmin
+                    height = ymax - ymin
+                    area = width * height
+                    
+                    if area < 16.0 or width < 4.0 or height < 4.0:
+                        remove_bbox = True
+                    
+                    if remove_bbox:
+                        objects_to_remove.append(member)
+                        continue
+                    
+                    # ⭐ WRITE FIXES BACK TO XML
+                    if needs_fix:
+                        bbox.find('xmin').text = str(int(xmin))
+                        bbox.find('ymin').text = str(int(ymin))
+                        bbox.find('xmax').text = str(int(xmax))
+                        bbox.find('ymax').text = str(int(ymax))
+                        stats['total_fixed'] += 1
                     
                     has_valid_object = True
                     
                 except Exception as e:
-                    invalid_bbox = True
-                    stats['invalid_bbox'].append((image_name, f"BBox error: {e}"))
-                    break
-
-            if invalid_bbox:
-                problematic_images.append((image_name, "invalid_bbox"))
+                    objects_to_remove.append(member)
+                    continue
+            
+            # Remove invalid objects
+            for obj in objects_to_remove:
+                root.remove(obj)
+            
+            # ⭐ SAVE FIXED XML
+            if len(objects_to_remove) > 0 and has_valid_object:
+                try:
+                    tree.write(possible_annot_name)
+                except:
+                    pass
+            
+            # Remove if no valid objects
+            if not has_valid_object:
                 images_to_remove.append(image_name)
-            elif not has_valid_object:
-                problematic_images.append((image_name, "no_valid_objects"))
-                images_to_remove.append(image_name)
-                stats['no_valid_objects'].append(image_name)
+                stats['total_removed'] += 1
 
         # Remove problematic images
         self.all_images = [img for img in self.all_images if img not in images_to_remove]
-        self.all_annot_paths = [
-            path for path in self.all_annot_paths 
-            if not any(
-                os.path.splitext(os.path.basename(path))[0] + ext in images_to_remove 
-                for ext in self.image_file_types
-            )
-        ]
 
-        # TRUNCATED REPORTING
+        # Report
         print("\n" + "="*80)
-        print("📊 DATASET VALIDATION REPORT (TRUNCATED)")
+        print("📊 AGGRESSIVE CLEANING REPORT")
         print("="*80)
-        
-        if stats['missing_annotations']:
-            count = len(stats['missing_annotations'])
-            print(f"\n⚠️  Missing Annotations: {count}")
-            for img in stats['missing_annotations'][:5]:
-                print(f"   • {img}")
-            if count > 5:
-                print(f"   ... and {count-5} more")
-        
-        if stats['invalid_bbox']:
-            count = len(stats['invalid_bbox'])
-            print(f"\n⚠️  Invalid Bounding Boxes: {count}")
-            for img, reason in stats['invalid_bbox'][:5]:
-                print(f"   • {img}: {reason}")
-            if count > 5:
-                print(f"   ... and {count-5} more")
-        
+        print(f"\n✅ Fixed Annotations: {stats['total_fixed']}")
+        print(f"🗑️  Removed Images: {stats['total_removed']}")
+        print(f"✅ Valid Remaining: {len(self.all_images)}")
         if stats['negative_coords']:
-            count = len(stats['negative_coords'])
-            print(f"\n❌ NEGATIVE COORDINATES (CRITICAL): {count}")
-            for img, coords in stats['negative_coords'][:5]:
-                print(f"   • {img}: {coords}")
-            if count > 5:
-                print(f"   ... and {count-5} more")
-            print(f"   💡 These cause augmentation errors!")
-        
+            print(f"⭐ Fixed Negative Coords: {len(stats['negative_coords'])}")
         if stats['out_of_bounds']:
-            count = len(stats['out_of_bounds'])
-            print(f"\n⚠️  Out of Bounds Boxes: {count}")
-            for img, reason in stats['out_of_bounds'][:5]:
-                print(f"   • {img}: {reason}")
-            if count > 5:
-                print(f"   ... and {count-5} more")
-        
-        if stats['zero_area']:
-            count = len(stats['zero_area'])
-            print(f"\n⚠️  Zero/Tiny Area Boxes: {count}")
-            for img, reason in stats['zero_area'][:5]:
-                print(f"   • {img}: {reason}")
-            if count > 5:
-                print(f"   ... and {count-5} more")
-        
-        if stats['no_valid_objects']:
-            count = len(stats['no_valid_objects'])
-            print(f"\n⚠️  No Valid Objects: {count}")
-            for img in stats['no_valid_objects'][:5]:
-                print(f"   • {img}")
-            if count > 5:
-                print(f"   ... and {count-5} more")
-        
-        if stats['unknown_classes']:
-            print(f"\n⚠️  UNKNOWN CLASSES DETECTED:")
-            total_unknown = sum(stats['unknown_classes'].values())
-            print(f"   Total ignored: {total_unknown:,} annotations")
-            print(f"   Classes:")
-            for cls, count in sorted(stats['unknown_classes'].items(), key=lambda x: -x[1])[:5]:
-                print(f"      • '{cls}': {count:,}")
-            if len(stats['unknown_classes']) > 5:
-                print(f"      ... and {len(stats['unknown_classes'])-5} more classes")
-        
-        print(f"\n" + "-"*80)
-        print(f"📈 SUMMARY:")
-        print(f"   • Original: {len(self.all_images) + len(images_to_remove):,}")
-        print(f"   • Removed: {len(images_to_remove):,}")
-        print(f"   • Remaining: {len(self.all_images):,}")
-        
-        if stats['negative_coords']:
-            print(f"\n   ❌ CRITICAL: {len(stats['negative_coords'])} images with negative coords removed")
-            print(f"      These would cause albumentations to crash!")
-        
+            print(f"⭐ Fixed Out-of-Bounds: {len(stats['out_of_bounds'])}")
         print("="*80 + "\n")
 
     def resize(self, im, square=False):
@@ -450,59 +403,26 @@ class CustomDataset(Dataset):
         return image, image_resized, orig_boxes, \
             boxes, labels, area, iscrowd, (image_width, image_height)
 
-    def check_image_and_annotation(
-        self, 
-        xmin, 
-        ymin, 
-        xmax, 
-        ymax, 
-        width, 
-        height, 
-        orig_data=False
-    ):
-        """
-        Enhanced version with STRICT coordinate validation.
-        Prevents negative coordinates and out-of-bounds issues.
-        """
-        # CRITICAL: Clamp all coordinates to valid range [0, width/height]
-        xmin = max(0.0, min(xmin, width - 1.0))
-        ymin = max(0.0, min(ymin, height - 1.0))
-        xmax = max(0.0, min(xmax, width))
-        ymax = max(0.0, min(ymax, height))
+    def check_image_and_annotation(self, xmin, ymin, xmax, ymax, width, height, orig_data=False):
+        """⭐ ULTRA-STRICT coordinate validation"""
+        # Clamp to valid range with 2px margin
+        xmin = float(max(0.0, min(xmin, width - 2.0)))
+        ymin = float(max(0.0, min(ymin, height - 2.0)))
+        xmax = float(max(2.0, min(xmax, width)))
+        ymax = float(max(2.0, min(ymax, height)))
         
-        # Ensure max > min (maintain bbox validity)
-        if ymax <= ymin:
-            ymax = ymin + 1.0
-            if ymax > height:
-                ymax = height
-                ymin = ymax - 1.0
+        # Ensure minimum 4x4 size
+        if xmax - xmin < 4.0:
+            center_x = (xmin + xmax) / 2.0
+            xmin = max(0.0, center_x - 2.0)
+            xmax = min(width, center_x + 2.0)
         
-        if xmax <= xmin:
-            xmax = xmin + 1.0
-            if xmax > width:
-                xmax = width
-                xmin = xmax - 1.0
+        if ymax - ymin < 4.0:
+            center_y = (ymin + ymax) / 2.0
+            ymin = max(0.0, center_y - 2.0)
+            ymax = min(height, center_y + 2.0)
         
-        # Ensure minimum size (at least 1 pixel)
-        if xmax - xmin <= 1.0:
-            if orig_data and self.log_annot_issue_x:
-                self.log_annot_issue_x = False
-            xmin = max(0.0, xmin - 0.5)
-            xmax = min(width, xmax + 0.5)
-        
-        if ymax - ymin <= 1.0:
-            if orig_data and self.log_annot_issue_y:
-                self.log_annot_issue_y = False
-            ymin = max(0.0, ymin - 0.5)
-            ymax = min(height, ymax + 0.5)
-        
-        # Final safety clamp
-        xmin = max(0.0, xmin)
-        ymin = max(0.0, ymin)
-        xmax = min(width, xmax)
-        ymax = min(height, ymax)
-        
-        return xmin, ymin, xmax, ymax
+        return float(xmin), float(ymin), float(xmax), float(ymax)
 
     def load_cutmix_image_and_boxes(self, index, resize_factor=512):
         """ 
@@ -568,67 +488,46 @@ class CustomDataset(Dataset):
             torch.tensor(np.array(final_classes)), area, iscrowd, dims
 
     def validate_boxes_post_augmentation(self, boxes, image_shape):
-            """
-            ⭐ CRITICAL FIX: Post-augmentation validation to filter invalid boxes.
-            This prevents PyTorch assertion errors from invalid bounding boxes.
+        """⭐ Post-augmentation validator - catches ALL invalid boxes"""
+        if len(boxes) == 0:
+            return torch.ones(0, dtype=torch.bool)
+        
+        if isinstance(boxes, torch.Tensor):
+            boxes_np = boxes.cpu().numpy()
+        else:
+            boxes_np = np.array(boxes)
+        
+        height, width = image_shape[:2]
+        valid_mask = np.ones(len(boxes_np), dtype=bool)
+        
+        for i, box in enumerate(boxes_np):
+            xmin, ymin, xmax, ymax = box
             
-            STRICT VALIDATION:
-            - Check for positive dimensions (width > 0 AND height > 0)
-            - Check within image bounds
-            - Check minimum area (area >= 1.0)
-            - Reject boxes with width or height = 0
+            width_box = xmax - xmin
+            height_box = ymax - ymin
             
-            Args:
-                boxes: Tensor or list of bounding boxes [xmin, ymin, xmax, ymax]
-                image_shape: Tuple (height, width) of the image
-                
-            Returns:
-                valid_mask: Boolean mask for valid boxes
-            """
-            if len(boxes) == 0:
-                return torch.ones(0, dtype=torch.bool)
+            # STRICT checks
+            if width_box <= 0 or height_box <= 0:
+                valid_mask[i] = False
+                continue
             
-            # Convert to numpy for easier manipulation
-            if isinstance(boxes, torch.Tensor):
-                boxes_np = boxes.cpu().numpy()
-            else:
-                boxes_np = np.array(boxes)
+            # Minimum 4x4 pixels
+            if width_box < 4.0 or height_box < 4.0:
+                valid_mask[i] = False
+                continue
             
-            height, width = image_shape[:2]
+            # Within bounds (with small tolerance)
+            if xmin < -0.1 or ymin < -0.1 or xmax > (width + 0.1) or ymax > (height + 0.1):
+                valid_mask[i] = False
+                continue
             
-            # Create validity mask
-            valid_mask = np.ones(len(boxes_np), dtype=bool)
-            
-            for i, box in enumerate(boxes_np):
-                xmin, ymin, xmax, ymax = box
-                
-                # ⭐ CRITICAL: Check 1 - Positive dimensions (STRICT)
-                # PyTorch requires: xmax > xmin AND ymax > ymin
-                box_width = xmax - xmin
-                box_height = ymax - ymin
-                
-                if box_width <= 0 or box_height <= 0:
-                    valid_mask[i] = False
-                    continue
-                
-                # Check 2: Within image bounds (with small tolerance)
-                tolerance = 0.1  # Small tolerance for floating point errors
-                if xmin < -tolerance or ymin < -tolerance or xmax > (width + tolerance) or ymax > (height + tolerance):
-                    valid_mask[i] = False
-                    continue
-                
-                # Check 3: Minimum area (avoid tiny boxes)
-                area = box_width * box_height
-                if area < 1.0:
-                    valid_mask[i] = False
-                    continue
-                
-                # Check 4: Reasonable dimensions (at least 2x2 pixels)
-                if box_width < 2.0 or box_height < 2.0:
-                    valid_mask[i] = False
-                    continue
-            
-            return torch.tensor(valid_mask, dtype=torch.bool)
+            # Minimum area 16px²
+            area = width_box * height_box
+            if area < 16.0:
+                valid_mask[i] = False
+                continue
+        
+        return torch.tensor(valid_mask, dtype=torch.bool)
 
     def __getitem__(self, idx):
             # ⭐ IMPROVED: Deterministic retry to preserve data distribution

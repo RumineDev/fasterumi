@@ -45,7 +45,7 @@ def get_train_aug():
         A.VerticalFlip(p=0.3),
         
         # Rotation: -10° to +10°
-        A.Rotate(limit=10, p=0.5, border_mode=0),
+        A.Rotate(limit=5, p=0.3, border_mode=0),
         
         # Scale variations
         A.OneOf([
@@ -155,8 +155,8 @@ def get_train_aug():
     ], bbox_params=A.BboxParams(
         format='pascal_voc',
         label_fields=['labels'],
-        min_visibility=0.3,
-        min_area=100.0,
+        min_visibility=0.2,
+        min_area=50.0,
     ))
 
 def get_train_transform():
