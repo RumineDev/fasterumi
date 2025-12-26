@@ -569,8 +569,8 @@ class CustomDataset(Dataset):
 
     def validate_boxes_post_augmentation(self, boxes, image_shape):
         """
-        ⭐ NEW: Post-augmentation validation to filter invalid boxes.
-        This is the CRITICAL fix that prevents PyTorch assertion errors.
+        ⭐ CRITICAL FIX: Post-augmentation validation to filter invalid boxes.
+        This prevents PyTorch assertion errors from invalid bounding boxes.
         
         Args:
             boxes: Tensor or list of bounding boxes [xmin, ymin, xmax, ymax]
@@ -601,7 +601,7 @@ class CustomDataset(Dataset):
                 valid_mask[i] = False
                 continue
             
-            # Check 2: Within image bounds (with small tolerance)
+            # Check 2: Within image bounds (strict)
             if xmin < 0 or ymin < 0 or xmax > width or ymax > height:
                 valid_mask[i] = False
                 continue
@@ -643,8 +643,15 @@ class CustomDataset(Dataset):
         image_id = torch.tensor([idx])
         target["image_id"] = image_id
 
-        # Before transformation
-        labels = labels.cpu().numpy().tolist() if isinstance(labels, torch.Tensor) else labels
+        # ⭐ CRITICAL FIX: Ensure labels and boxes have same length BEFORE augmentation
+        if len(target['boxes']) != len(target['labels']):
+            # This should never happen, but as a safety measure
+            min_len = min(len(target['boxes']), len(target['labels']))
+            target['boxes'] = target['boxes'][:min_len]
+            target['labels'] = target['labels'][:min_len]
+
+        # Before transformation - convert to list format for albumentations
+        labels = target['labels'].cpu().numpy().tolist() if isinstance(target['labels'], torch.Tensor) else target['labels']
         bboxes = target['boxes'].cpu().numpy().tolist() if isinstance(target['boxes'], torch.Tensor) else target['boxes'].tolist()
 
         # ⭐ CRITICAL FIX: Apply augmentation with robust error handling
@@ -658,7 +665,7 @@ class CustomDataset(Dataset):
                 target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
             else:
                 sample = self.transforms(image=image_resized,
-                                         bboxes=target['boxes'],
+                                         bboxes=bboxes,
                                          labels=labels)
                 image_resized = sample['image']
                 target['boxes'] = torch.Tensor(sample['bboxes']).to(torch.float32)
@@ -678,6 +685,15 @@ class CustomDataset(Dataset):
                 target['boxes'], 
                 image_resized.shape[1:]  # (H, W)
             )
+            
+            # ⭐ CRITICAL: Ensure mask length matches both boxes AND labels
+            # This is where the original error occurred
+            if len(valid_mask) != len(target['boxes']):
+                # Mask length mismatch - use minimum length
+                min_len = min(len(valid_mask), len(target['boxes']), len(target['labels']))
+                valid_mask = valid_mask[:min_len]
+                target['boxes'] = target['boxes'][:min_len]
+                target['labels'] = target['labels'][:min_len]
             
             # Filter out invalid boxes
             if valid_mask.sum() == 0:
@@ -701,7 +717,7 @@ class CustomDataset(Dataset):
                     target['iscrowd'] = torch.zeros(0, dtype=torch.int64)
 
         # Final safety check for NaN or invalid tensors
-        if np.isnan((target['boxes']).numpy()).any() or target['boxes'].shape == torch.Size([0]):
+        if len(target['boxes']) > 0 and (np.isnan((target['boxes']).numpy()).any() or target['boxes'].shape == torch.Size([0])):
             target['boxes'] = torch.zeros((0, 4), dtype=torch.float32)
             target['labels'] = torch.zeros(0, dtype=torch.int64)
             target['area'] = torch.zeros(0, dtype=torch.float32)
