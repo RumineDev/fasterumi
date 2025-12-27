@@ -69,10 +69,10 @@ def get_train_aug():
         ),
         
         # Random Gamma (10% - same as old)
-        A.RandomGamma(
-            gamma_limit=(80, 120),  # Standard range
-            p=0.1
-        ),
+        #A.RandomGamma(
+        #    gamma_limit=(80, 120),  # Standard range
+        #    p=0.1
+        #),
         
         # ========================================
         # MINIMAL GEOMETRIC (NEW - but very light)
@@ -274,4 +274,5 @@ def infer_transforms(image):
         transforms.ToPILImage(),
         transforms.ToTensor(),
     ])
+
     return transform(image)
